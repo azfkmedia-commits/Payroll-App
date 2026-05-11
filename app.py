@@ -9,45 +9,44 @@ from datetime import datetime, timedelta
 from io import BytesIO
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Payroll Scanner Pro", layout="wide")
+st.set_page_config(page_title="Payroll Pro", layout="wide")
 
-# Constants for Calculations
+# Constants
 DAILY_RATE = 69.00
 EPF_EMP_RATE = 0.11
-EPF_BOSS_RATE = 0.13
 
-# Styles for Excel Template
+# Excel Styling
 DARK_BLUE = PatternFill(start_color="333F4F", end_color="333F4F", fill_type="solid")
 GRAY_HEADER = PatternFill(start_color="D6DCE4", end_color="D6DCE4", fill_type="solid")
 YELLOW_OFF = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-SUM_GRAY = PatternFill(start_color="A6ACAF", end_color="A6ACAF", fill_type="solid")
 WHITE_FONT = Font(color="FFFFFF", bold=True)
 BLACK_BOLD = Font(color="000000", bold=True)
 THIN_BORDER = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-# --- OCR ENGINE ---
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(['en'])
 
 reader = load_ocr()
 
-# --- HELPER FUNCTIONS ---
-def get_april_dates():
-    start = datetime(2026, 4, 1)
-    return [(start + timedelta(days=i)).strftime("%d-%m-%Y") for i in range(30)]
+def get_days_in_month(year=2026, month=4):
+    start = datetime(year, month, 1)
+    days = []
+    while start.month == month:
+        days.append(start.strftime("%d-%m-%Y"))
+        start += timedelta(days=1)
+    return days
 
-def create_excel_report(attendance_results):
+def create_excel(attendance_data):
     output = BytesIO()
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "April 2026 Payroll"
+    dates = get_days_in_month()
     
     current_row = 1
-    dates = get_april_dates()
-
-    for name, present_dates in attendance_results.items():
-        # Staff Banner
+    # attendance_data is now a dict: { "NAME": [list of dates present] }
+    for name, present_dates in attendance_data.items():
+        # Header Banner
         ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
         cell = ws.cell(row=current_row, column=1, value=name.upper())
         cell.fill = DARK_BLUE
@@ -55,81 +54,72 @@ def create_excel_report(attendance_results):
         cell.alignment = Alignment(horizontal="center")
         current_row += 1
 
-        # Headers
-        headers = ["DATE", "DAY", "IN", "LATE IN", "KOMISYEN", "OUT", "EXTRA HOUR"]
-        for col, text in enumerate(headers, 1):
-            c = ws.cell(row=current_row, column=col, value=text)
+        # Column Headers
+        cols = ["DATE", "DAY", "IN", "LATE IN", "KOMISYEN", "OUT", "EXTRA HOUR"]
+        for i, text in enumerate(cols, 1):
+            c = ws.cell(row=current_row, column=i, value=text)
             c.fill = GRAY_HEADER
             c.font = BLACK_BOLD
             c.border = THIN_BORDER
         current_row += 1
 
-        # Data Rows
+        # Monthly Data Rows
         present_count = 0
-        for date_str in dates:
-            day_obj = datetime.strptime(date_str, "%d-%m-%Y")
-            day_name = day_obj.strftime("%A").upper()
+        for d_str in dates:
+            day_name = datetime.strptime(d_str, "%d-%m-%Y").strftime("%A").upper()
+            is_present = d_str in present_dates
             
-            if date_str in present_dates:
-                row_vals = [date_str, day_name, "09:00", "", "", "18:00", ""] # Default times
-                is_off = False
-                present_count += 1
-            else:
-                row_vals = [date_str, day_name, "", "", "OFF DAY", "", ""]
-                is_off = True
+            row_data = [d_str, day_name, "09:00" if is_present else "", "", "" if is_present else "OFF DAY", "18:00" if is_present else "", ""]
             
-            for col, val in enumerate(row_vals, 1):
-                c = ws.cell(row=current_row, column=col, value=val)
+            for i, val in enumerate(row_data, 1):
+                c = ws.cell(row=current_row, column=i, value=val)
                 c.border = THIN_BORDER
-                if is_off:
+                if not is_present and i == 5: # Highlight OFF DAY in yellow
                     c.fill = YELLOW_OFF
+                    c.font = BLACK_BOLD
+            
+            if is_present: present_count += 1
             current_row += 1
 
-        # Salary Summary Row
+        # Total Row
         gross = present_count * DAILY_RATE
-        epf_e = gross * EPF_EMP_RATE
-        net = gross - epf_e
-
-        ws.cell(row=current_row, column=1, value="TOTAL DAYS:").font = BLACK_BOLD
-        ws.cell(row=current_row, column=2, value=present_count)
-        ws.cell(row=current_row, column=3, value="NET SALARY:").font = BLACK_BOLD
-        ws.cell(row=current_row, column=4, value=f"RM {net:.2f}")
+        net = gross * (1 - EPF_EMP_RATE)
+        ws.cell(row=current_row, column=1, value=f"TOTAL DAYS: {present_count} | NET SALARY: RM {net:.2f}").font = BLACK_BOLD
         current_row += 3
 
     wb.save(output)
     return output.getvalue()
 
-# --- MAIN APP UI ---
-st.title("📊 Payroll Pro: Scan & Calculate")
-st.sidebar.header("Salary Settings")
-rate = st.sidebar.number_input("Daily Rate (RM)", value=69.0)
+# --- APP UI ---
+st.title("📸 Dynamic Payroll Scanner")
+st.write("Upload logs; names are detected automatically.")
 
-uploaded_images = st.file_uploader("Scan Attendance Logs (Photos)", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
+files = st.file_uploader("Upload Photos", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
 
-if uploaded_images:
-    all_extracted_text = []
-    with st.spinner("Scanning photos..."):
-        for img_file in uploaded_images:
-            img = Image.open(img_file)
-            results = reader.readtext(np.array(img))
-            all_extracted_text.extend([res[1] for res in results])
+if files:
+    # This dictionary will store whatever names the AI finds
+    detected_attendance = {} 
     
-    st.success(f"Scanned {len(uploaded_images)} photos!")
-    
-    # Simple logic to find names in scanned text
-    staff_found = {}
-    names_to_check = ["DIJAH", "ROS", "MOON", "EPPY", "SYAFIZ"]
-    
-    # (In a real app, you'd match dates here too. For now, we'll simulate the match)
-    for name in names_to_check:
-        if any(name in text.upper() for text in all_extracted_text):
-            staff_found[name] = ["01-04-2026", "02-04-2026"] # Example identified dates
+    with st.spinner("Analyzing text..."):
+        for f in files:
+            img = np.array(Image.open(f))
+            results = reader.readtext(img)
+            
+            # Logic: If the AI finds a word that looks like a name, add it to the list
+            for (_, text, _) in results:
+                clean_text = text.strip().upper()
+                # Simple filter: ignore numbers/dates, focus on words (Names)
+                if len(clean_text) > 2 and clean_text.isalpha():
+                    if clean_text not in detected_attendance:
+                        detected_attendance[clean_text] = []
+                    # For this demo, we assume the found name is present on the current date
+                    # In your real setup, you'd link the name to the date nearby in the photo
+                    today_str = "01-04-2026" 
+                    if today_str not in detected_attendance[clean_text]:
+                        detected_attendance[clean_text].append(today_str)
 
-    if st.button("Generate April Template & Payroll"):
-        excel_data = create_excel_report(staff_found)
-        st.download_button(
-            label="📥 Download Excel Report",
-            data=excel_data,
-            file_name="April_Payroll_Final.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    st.success(f"Detected Employees: {', '.join(detected_attendance.keys())}")
+    
+    if st.button("Generate Report"):
+        data = create_excel(detected_attendance)
+        st.download_button("Download Excel", data, "Payroll_Report.xlsx")
